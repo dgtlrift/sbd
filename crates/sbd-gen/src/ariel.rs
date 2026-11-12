@@ -600,6 +600,56 @@ impl<'a> RenderTarget<'a> {
         }
         code.push_str("];\n");
 
+        // DISCUSSION SKETCH: not yet validated end-to-end, see sbd#134 follow-up.
+        if i2c_buses.iter().any(|bus| !bus.devices.is_empty()) {
+            code.push_str(&self.render_i2c_devices()?);
+        }
+
+        Ok(code)
+    }
+
+    /// DISCUSSION SKETCH: see the doc comment on [`sbd_gen_schema::i2c::I2cDevice`].
+    fn render_i2c_devices(&mut self) -> Result<String> {
+        let i2c_buses = &self.target.i2c;
+        let mut code = String::new();
+
+        code.push_str("ariel_os_hal::define_i2c_devices![\n");
+
+        for (n, bus) in i2c_buses.iter().enumerate() {
+            for (m, device) in bus.devices.iter().enumerate() {
+                let device_name = format!("i2c{n}_device{m}");
+
+                if let Some(enable) = &device.enable {
+                    self.resources.claim(enable, &device_name)?;
+                }
+                if let Some(interrupt) = &device.interrupt {
+                    self.resources.claim(interrupt, &device_name)?;
+                }
+
+                let enable_string = device
+                    .enable
+                    .as_ref()
+                    .map_or_else(|| "None".to_string(), |pin| format!("Some({pin})"));
+                let interrupt_string = device
+                    .interrupt
+                    .as_ref()
+                    .map_or_else(|| "None".to_string(), |pin| format!("Some({pin})"));
+
+                let aliases_string = format_aliases(&device.aliases, &device_name)?;
+                let device_type = device.type_.replace(char::is_whitespace, "_");
+
+                writeln!(
+                    code,
+                    "{{ name: I2c{n}Device{m}, bus: I2c{n}, type_: {}, address: {}, \
+                     enable: {}, interrupt: {}, aliases: [{}] }},",
+                    device_type, device.address, enable_string, interrupt_string, aliases_string
+                )
+                .unwrap();
+            }
+        }
+
+        code.push_str("];\n");
+
         Ok(code)
     }
 }
@@ -811,6 +861,91 @@ fn test_render_spi_buses() {
 ariel_os_hal::define_spi_devices![
 { name: Spi0Device0, bus: Spi0, type_: sensor_foo, cs: P0_30, drdy: Some(P0_03), aliases: [] },
 { name: Spi0Device1, bus: Spi0, type_: flash, cs: P0_31, drdy: None, aliases: [ext_flash,] },
+];
+"
+    );
+}
+
+// DISCUSSION SKETCH: `I2cDevice` is not yet validated end-to-end (see
+// sbd#134 follow-up). This test uses the two real-world examples the sketch
+// was built from: the ST B-L475E-IOT01A's onboard sensor bus, and the
+// nRF9160-DK's PCAL6408A I/O expander.
+#[test]
+fn test_render_i2c_devices() {
+    use sbd_gen_schema::i2c::{I2cBus, I2cDevice};
+
+    let i2c = vec![
+        I2cBus {
+            scl_pin: "PB10".to_owned(),
+            sda_pin: "PB11".to_owned(),
+            aliases: vec![],
+            possible_peripherals: vec!["I2C2".to_owned()],
+            devices: vec![
+                I2cDevice {
+                    type_: "hts221".to_owned(),
+                    aliases: vec!["humidity_temp".to_string()],
+                    address: "0x5F".to_owned(),
+                    interrupt: None,
+                    enable: None,
+                },
+                I2cDevice {
+                    type_: "lps22hb".to_owned(),
+                    aliases: vec!["barometer".to_string()],
+                    address: "0x5D".to_owned(),
+                    interrupt: None,
+                    enable: None,
+                },
+                I2cDevice {
+                    type_: "lis3mdl".to_owned(),
+                    aliases: vec!["magnetometer".to_string()],
+                    address: "0x1E".to_owned(),
+                    interrupt: None,
+                    enable: None,
+                },
+                I2cDevice {
+                    type_: "vl53l0x".to_owned(),
+                    aliases: vec!["tof".to_string()],
+                    address: "0x29".to_owned(),
+                    interrupt: None,
+                    enable: None,
+                },
+            ],
+        },
+        I2cBus {
+            scl_pin: "P0_31".to_owned(),
+            sda_pin: "P0_30".to_owned(),
+            aliases: vec![],
+            possible_peripherals: vec!["SERIAL0".to_owned(), "SERIAL1".to_owned()],
+            devices: vec![I2cDevice {
+                type_: "pcal6408a".to_owned(),
+                aliases: vec!["io_expander".to_string()],
+                address: "0x20".to_owned(),
+                interrupt: None,
+                enable: Some("P0_14".to_owned()),
+            }],
+        },
+    ];
+
+    let target = Target {
+        i2c,
+        ..test_default_target()
+    };
+
+    let mut render_target = RenderTarget::new(&target);
+
+    let rendered = render_target.render_i2c_buses().unwrap();
+    assert_eq!(
+        rendered,
+        "ariel_os_hal::define_i2c_buses![
+{ name: I2c0, peripheral: I2C2, sda: PB11, scl: PB10, aliases: [] },
+{ name: I2c1, peripheral: SERIAL0, sda: P0_30, scl: P0_31, aliases: [] },
+];
+ariel_os_hal::define_i2c_devices![
+{ name: I2c0Device0, bus: I2c0, type_: hts221, address: 0x5F, enable: None, interrupt: None, aliases: [humidity_temp,] },
+{ name: I2c0Device1, bus: I2c0, type_: lps22hb, address: 0x5D, enable: None, interrupt: None, aliases: [barometer,] },
+{ name: I2c0Device2, bus: I2c0, type_: lis3mdl, address: 0x1E, enable: None, interrupt: None, aliases: [magnetometer,] },
+{ name: I2c0Device3, bus: I2c0, type_: vl53l0x, address: 0x29, enable: None, interrupt: None, aliases: [tof,] },
+{ name: I2c1Device0, bus: I2c1, type_: pcal6408a, address: 0x20, enable: Some(P0_14), interrupt: None, aliases: [io_expander,] },
 ];
 "
     );
